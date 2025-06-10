@@ -1,0 +1,8 @@
+# requirements.txt
+google-api-python-client
+google-auth-oauthlib
+beautifulsoup4
+google-generativeai
+python-dotenv
+elevenlabs
+pydub
