@@ -8,6 +8,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
+NEWSLETTER_LABEL_ID = 'Label_2' 
 
 def get_newsletter_content():
     creds = None
@@ -24,42 +25,71 @@ def get_newsletter_content():
 
     service = build('gmail', 'v1', credentials=creds)
 
-    # Find newsletters. A simple way is to search for 'unsubscribe' in the body
-    # from specific senders you know.
-    # Example query: 'from:(newsletter@example.com) "unsubscribe"'
+    # Fetch unread messages with the specified label
     results = service.users().messages().list(
         userId='me',
-        q='from:(the-ai-report@mail.beehiiv.com) is:unread', # Be specific to avoid processing all mail
-        maxResults=1
+        labelIds=[NEWSLETTER_LABEL_ID],
+        q='is:unread'
     ).execute()
     
     messages = results.get('messages', [])
     if not messages:
-        print('No new newsletters found.')
+        print('No new newsletters found under the specified label.')
         return None
 
-    msg_id = messages[0]['id']
-    message = service.users().messages().get(userId='me', id=msg_id).execute()
+    print(f"Found {len(messages)} new newsletters. Combining their content...")
     
-    payload = message['payload']
-    if 'parts' in payload:
-        part = next(p for p in payload['parts'] if p['mimeType'] == 'text/html')
-        data = part['body']['data']
-    else:
-        data = payload['body']['data']
+    all_content = []
+    message_ids_to_mark_read = []
 
-    html_content = base64.urlsafe_b64decode(data).decode('utf-8')
-    soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # Mark the email as read so we don't process it again
-    service.users().messages().modify(userId='me', id=msg_id, body={'removeLabelIds': ['UNREAD']}).execute()
+    for msg_summary in messages:
+        msg_id = msg_summary['id']
+        message = service.users().messages().get(userId='me', id=msg_id).execute()
+        
+        # Extract subject for context
+        subject = "No Subject"
+        for header in message['payload']['headers']:
+            if header['name'].lower() == 'subject':
+                subject = header['value']
+                break
 
-    return soup.get_text(separator='\n', strip=True)
+        # Get message body
+        payload = message['payload']
+        data = ''
+        if "parts" in payload:
+            try:
+                part = next(p for p in payload['parts'] if p['mimeType'] == 'text/html')
+                data = part['body']['data']
+            except StopIteration:
+                try:
+                    part = next(p for p in payload['parts'] if p['mimeType'] == 'text/plain')
+                    data = part['body']['data']
+                except StopIteration:
+                    continue # Skip emails with no readable body
+        else:
+            data = payload['body']['data']
 
-if __name__ == '__main__':
-    content = get_newsletter_content()
-    if content:
-        print("Successfully extracted newsletter content.")
-        # We would save this content to a file or pass it to the next step
-        with open("newsletter_content.txt", "w") as f:
-            f.write(content)
+        decoded_data = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+        
+        if 'html' in locals().get('part', {}).get('mimeType', ''):
+            soup = BeautifulSoup(decoded_data, 'html.parser')
+            text_content = soup.get_text(separator='\n', strip=True)
+        else:
+            text_content = decoded_data
+
+        # Prepend subject for better context for the LLM
+        all_content.append(f"--- NEWSLETTER: {subject} ---\n\n{text_content}\n\n")
+        message_ids_to_mark_read.append(msg_id)
+
+    # Batch-modify messages to mark them as read
+    if message_ids_to_mark_read:
+        service.users().messages().batchModify(
+            userId='me',
+            body={
+                'ids': message_ids_to_mark_read,
+                'removeLabelIds': ['UNREAD']
+            }
+        ).execute()
+        print(f"Marked {len(message_ids_to_mark_read)} newsletters as read.")
+
+    return "\n".join(all_content)
